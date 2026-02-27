@@ -1,0 +1,1310 @@
+//@version=5
+//───────────────────────────────────────────────────────────────//
+//                 📦 PROJECT DELIVERY FILE                      //
+//───────────────────────────────────────────────────────────────//
+// Project Title : Order Block Indicator V1.2
+// Version       : 1.2
+// Platform      : TradingView (Pine Script v5)
+// Description   :
+//   This indicator automatically detects Bullish and Bearish Order Blocks
+//   using refined body-based logic (Wick Rule) and pre-sweep mitigation validation.
+//   Includes marker candle validation (Straight & Swing patterns).
+//   Auto box drawing, fade/delete options, pip distance filtering, real-time alerts.
+//
+// Features:
+//   ✅ Hard-coded Wick Rule (body-based OB zones)
+//   ✅ Pre-Sweep Mitigation Rule
+//   ✅ Marker Validation (Straight & Swing patterns)
+//   ✅ Adjustable Order Block Duration
+//   ✅ Auto Distance Filter (in Pips)
+//   ✅ Optional Fade/Delete of Mitigated Boxes
+//   ✅ Real-Time Alerts for Confirmation & Mitigation
+//
+// Developer      : FX Coders Hub
+// Date Developed : February 2026
+//───────────────────────────────────────────────────────────────//
+
+//@version=5
+indicator("Order Block Indicator V1.2 (Marker Validation)", overlay=true)
+
+// === Inputs ===
+showBullishOB        = input(true,  "Show Bullish Order Block")
+showBearishOB        = input(true,  "Show Bearish Order Block")
+orderBlockDuration   = input(20, "Order Block Duration (bars)")
+deleteMitigatedBoxes = input(false, "Delete Mitigated Boxes After Mitigation")
+showMitigatedMarkers = input(true,  "Show Mitigated Order Block (instead of deleting)")
+enableDistanceCheck  = input(true,  "Enable Distance Check")
+maxDistancePips      = input(100.0, "Max OB Distance (pips)")
+
+// === Marker Validation Inputs ===
+useStraightMarker    = input(true,  "Enable Straight Marker Validation")
+useSwingMarker       = input(true,  "Enable Swing Marker Validation")
+requireMarkerOnBoth  = input(false, "Require BOTH markers (instead of either)")
+showOBLabel          = input(false, "Show OB label with marker type")
+maxLookback          = input.int(20, "Marker Lookback (bars)", minval=2, maxval=40)
+
+// === Visual Debugging Inputs ===
+enableDebug          = false// input(false, "🔍 Enable Visual Debugging")
+debugPlotLines       = false//input(false, "📊 Show Debug Plot Lines", group="Debug Settings")
+debugStartDate       = timestamp("2026-02-19 11:00")//input.time(timestamp("2026-02-19 11:00"), "Debug Start Date/Time")
+debugEndDate         = timestamp("2026-02-19 24:00")//input.time(timestamp("2026-02-19 24:00"), "Debug End Date/Time")
+
+// === Pip Size Calculation ===
+var float pipSize = 0.0
+// JPY pairs: pip = 0.01 (second decimal place)
+//   If mintick = 0.001 (3 decimals), then pipSize = 0.01 = mintick * 10
+// Other forex pairs: pip = 0.0001 (4th decimal place)
+//   If mintick = 0.00001 (5 decimals), then pipSize = 0.0001 = mintick * 10
+// Both JPY and other forex need mintick * 10 to get the pip value
+if str.contains(syminfo.ticker, "JPY")
+    pipSize := syminfo.mintick * 20  // Fixed: JPY pip is 0.01, not mintick
+else if syminfo.type == "forex"
+    pipSize := syminfo.mintick * 10
+else if str.contains(syminfo.ticker, "XAU")
+    pipSize := 0.1
+else
+    pipSize := syminfo.mintick
+
+maxDistance = maxDistancePips * pipSize
+
+// ═══════════════════════════════════════════════════════════════
+// DEBUG HELPER FUNCTIONS
+// ═══════════════════════════════════════════════════════════════
+
+// Check if current bar is within debug timeframe
+f_isInDebugTimeframe() =>
+    enableDebug and time >= debugStartDate and time <= debugEndDate
+
+// ═══════════════════════════════════════════════════════════════
+// MARKER VALIDATION FUNCTIONS
+// ═══════════════════════════════════════════════════════════════
+
+// === Helper: Check if candle is Bullish ===
+f_isBullish(o, c) => c > o
+
+// === Helper: Check if candle is Bearish ===
+f_isBearish(o, c) => c < o
+
+// ───────────────────────────────────────────────────────────────
+// STRAIGHT MARKER DETECTION
+// Pattern: Bullish → Bearish(s) → Bullish (with wick rule applied)
+// The lowest bearish in the sequence OR the final bullish becomes marker
+// ───────────────────────────────────────────────────────────────
+f_detectStraightMarker() =>
+    // Returns [isValid, markerLow, markerHigh]
+    // Checks current bar and 2 previous bars
+    
+    // Get candles: current and 2 previous
+    curr_o = open
+    curr_c = close
+    curr_h = high
+    curr_l = low
+    
+    prev_o = open[1]
+    prev_c = close[1]
+    prev_h = high[1]
+    prev_l = low[1]
+    
+    two_o = open[2]
+    two_c = close[2]
+    two_h = high[2]
+    two_l = low[2]
+    
+    // Pattern check (allow multiple bearish candles in the middle)
+    // Search within recent bars (1..maxLookback) for any Bull -> Bear(s) -> Bull pattern
+    // use global `maxLookback` input
+    bool found = false
+    float markerLow = na
+    float markerHigh = na
+    // Iterate lead index L from 2..maxLookback (lead is further back), tail T will be between 1 and L-1
+    for L = 2 to maxLookback
+        lead_o = open[L]
+        lead_c = close[L]
+        if not f_isBullish(lead_o, lead_c)
+            continue
+        // for each possible tail T (closer to current bar)
+        for T = 1 to L - 1
+            tail_o = open[T]
+            tail_c = close[T]
+            if not f_isBullish(tail_o, tail_c)
+                continue
+            // verify bars between T+1 .. L-1 are all bearish
+            bool allBear = true
+            float lowestBear = na
+            float highestHigh = high[L]
+            for m = T + 1 to L - 1
+                mid_o = open[m]
+                mid_c = close[m]
+                if not f_isBearish(mid_o, mid_c)
+                    allBear := false
+                lowestBear := na(lowestBear) ? low[m] : math.min(lowestBear, low[m])
+                highestHigh := math.max(highestHigh, high[m])
+            if allBear
+                // marker is the lowest low among the bearish middle candles (and consider tail low)
+                markerLow := math.min(lowestBear, low[T])
+                markerHigh := math.max(highestHigh, high[T])
+                found := true
+                break
+        if found
+            break
+    if found
+        [true, markerLow, markerHigh]
+    else
+        [false, na, na]
+
+// ───────────────────────────────────────────────────────────────
+// SWING MARKER DETECTION
+// Pattern: 3 candles forming a V-shape
+// Left candle high > Middle candle high, Right candle high > Middle candle high
+// Lowest point of V becomes marker
+// ───────────────────────────────────────────────────────────────
+f_detectSwingMarker() =>
+    // Returns [isValid, markerLow, markerHigh]
+    
+    // Get candles: current and 2 previous
+    curr_h = high
+    curr_l = low
+    prev_h = high[1]
+    prev_l = low[1]
+    two_h = high[2]
+    two_l = low[2]
+    
+    // Search for 3-bar V-shape within recent bars (1..maxLookback)
+    // use global `maxLookback` input
+    bool foundV = false
+    float vMarkerLow = na
+    float vMarkerHigh = na
+    // middle index m ranges 2..maxLookback-1 so left=m+1 and right=m-1 are valid
+    for m = 2 to maxLookback - 1
+        left_h = high[m + 1]
+        left_l = low[m + 1]
+        mid_h = high[m]
+        mid_l = low[m]
+        right_h = high[m - 1]
+        right_l = low[m - 1]
+        if (left_h > mid_h) and (right_h > mid_h) and (left_l > mid_l) and (right_l > mid_l)
+            vMarkerLow := mid_l
+            vMarkerHigh := math.max(left_h, right_h)
+            foundV := true
+            break
+    if foundV
+        [true, vMarkerLow, vMarkerHigh]
+    else
+        [false, na, na]
+
+// ───────────────────────────────────────────────────────────────
+// COMBINED MARKER VALIDATOR
+// Checks if a candle bar meets EITHER or BOTH marker criteria
+// Returns: [isValidMarker, markerLow, markerHigh, markerType]
+// markerType: "straight", "swing", or "both"
+// ───────────────────────────────────────────────────────────────
+f_isValidMarker() =>
+    [straightValid, straightLow, straightHigh] = f_detectStraightMarker()
+    [swingValid, swingLow, swingHigh] = f_detectSwingMarker()
+    
+    straightMatches = useStraightMarker and straightValid
+    swingMatches = useSwingMarker and swingValid
+    
+    // Determine if at least one (or both if required) markers match
+    if requireMarkerOnBoth
+        // BOTH markers must be detected
+        if straightMatches and swingMatches
+            // Return union of both ranges
+            combinedLow = math.min(straightLow, swingLow)
+            combinedHigh = math.max(straightHigh, swingHigh)
+            [true, combinedLow, combinedHigh, "both"]
+        else
+            [false, na, na, "none"]
+    else
+        // EITHER marker is sufficient
+        if straightMatches
+            [true, straightLow, straightHigh, "straight"]
+        else if swingMatches
+            [true, swingLow, swingHigh, "swing"]
+        else
+            [false, na, na, "none"]
+
+// ───────────────────────────────────────────────────────────────
+// PARTIAL BREAK (PB) VALIDATION
+// Valid signal conditions:
+// 1. Find bearish candle(s) after the OB
+// 2. A bullish candle closes after it
+// 3. Either the bullish candle itself or any candle after goes above the high of the bearish candles
+// ───────────────────────────────────────────────────────────────
+f_checkPartialBreakBullish(obHigh, obLow, confirmBar) =>
+    // Look for bearish candles after confirmation, then bullish candle that breaks above
+    // PB Rule: Find bearish candle(s) after OB, then bullish candle closes, then price goes above bearish high
+    bool pbValid = false
+    float highestBearishHigh = na
+    bool foundBearishGroup = false
+    
+    // Find bearish candles after confirmation (looking back from current bar)
+    for i = 1 to maxLookback
+        if bar_index - confirmBar >= i
+            checkO = open[i]
+            checkC = close[i]
+            checkH = high[i]
+            if f_isBearish(checkO, checkC)
+                foundBearishGroup := true
+                if na(highestBearishHigh)
+                    highestBearishHigh := checkH
+                else
+                    highestBearishHigh := math.max(highestBearishHigh, checkH)
+            else if f_isBullish(checkO, checkC) and foundBearishGroup and not na(highestBearishHigh)
+                // Found bullish candle after bearish group
+                // Check if current bar or this bullish candle breaks above bearish high
+                if high > highestBearishHigh or checkH > highestBearishHigh
+                    pbValid := true
+                    break
+    
+    pbValid
+
+f_checkPartialBreakBearish(obHigh, obLow, confirmBar) =>
+    // Look for bullish candles after confirmation, then bearish candle that breaks below
+    // PB Rule: Find bullish candle(s) after OB, then bearish candle closes, then price goes below bullish low
+    bool pbValid = false
+    float lowestBullishLow = na
+    bool foundBullishGroup = false
+    
+    // Find bullish candles after confirmation (looking back from current bar)
+    for i = 1 to maxLookback
+        if bar_index - confirmBar >= i
+            checkO = open[i]
+            checkC = close[i]
+            checkL = low[i]
+            if f_isBullish(checkO, checkC)
+                foundBullishGroup := true
+                if na(lowestBullishLow)
+                    lowestBullishLow := checkL
+                else
+                    lowestBullishLow := math.min(lowestBullishLow, checkL)
+            else if f_isBearish(checkO, checkC) and foundBullishGroup and not na(lowestBullishLow)
+                // Found bearish candle after bullish group
+                // Check if current bar or this bearish candle breaks below bullish low
+                if low < lowestBullishLow or checkL < lowestBullishLow
+                    pbValid := true
+                    break
+    
+    pbValid
+
+// === Colors ===
+bullishOBColor         = input(color.new(color.blue, 77), "Bullish OB Fill")
+bearishOBColor         = input(color.new(color.red, 77),  "Bearish OB Fill")
+bullishOBBorder        = input(color.new(color.blue, 50), "Bullish OB Border")
+bearishOBBorder        = input(color.new(color.red, 50), "Bearish OB Border")
+bullishMitigatedFade   = input(85, "Bullish Mitigated Fade (0-100)")
+bearishMitigatedFade   = input(85, "Bearish Mitigated Fade (0-100)")
+bullishMitigatedBorder = input(color.new(color.green, 50), "Bullish Mitigated Border")
+bearishMitigatedBorder = input(color.new(color.green, 50), "Bearish Mitigated Border")
+
+// === Candle Classification ===
+isBullish = close > open
+isBearish = close < open
+isNeutral = close == open
+
+// === Track Reference Candles ===
+// IMPORTANT: Always track the MOST RECENT candle, even if it has a very small body/wick
+// This ensures we use the LAST candle in a consecutive group, not an earlier one
+var float lastBearishHigh = na
+var float lastBearishLow  = na
+var int   lastBearishBar  = na
+var float lastBullishHigh = na
+var float lastBullishLow  = na
+var float lastBullishOpen = na  // Track open for body-based break detection
+var int   lastBullishBar  = na
+
+if isBearish
+    // Always update to the most recent bearish candle (even if very small)
+    // This ensures we use the LAST bearish candle before a bullish break
+    lastBearishHigh := high
+    lastBearishLow  := low
+    lastBearishBar  := bar_index
+
+if isBullish
+    // Always update to the most recent bullish candle (even if very small)
+    // This ensures we use the LAST bullish candle before a bearish break
+    // Even if the body/wick is almost zero, this is still the correct candle to use
+    lastBullishHigh := high
+    lastBullishLow  := low
+    lastBullishOpen := open  // Track open for body-based break detection
+    lastBullishBar  := bar_index
+
+// === Handle Doji Candles (close == open) ===
+// Doji candles have no body, so we treat them as continuing the most recent trend
+// This ensures we don't miss OBs when a doji appears before a break
+// Strategy: Treat doji as continuation of the most recently tracked direction
+//           This makes sense because doji represents indecision/consolidation in the current trend
+if isNeutral
+    // Determine which direction was most recent (bullish or bearish)
+    bool bullishMoreRecent = false
+    if not na(lastBullishBar) and not na(lastBearishBar)
+        // Both exist - use the one with higher bar_index (more recent)
+        bullishMoreRecent := lastBullishBar > lastBearishBar
+    else if not na(lastBullishBar)
+        // Only bullish exists
+        bullishMoreRecent := true
+    // else: only bearish exists or neither exists (treat as bearish or don't track)
+    
+    if bullishMoreRecent
+        // Doji appears after bullish candles - treat as bullish continuation
+        // This ensures the doji can be used as the OB candle if a bearish break follows
+        lastBullishHigh := high
+        lastBullishLow  := low
+        lastBullishOpen := open  // For doji, open == close, but we still track it
+        lastBullishBar  := bar_index
+    else if not na(lastBearishBar)
+        // Doji appears after bearish candles - treat as bearish continuation
+        // This ensures the doji can be used as the OB candle if a bullish break follows
+        lastBearishHigh := high
+        lastBearishLow  := low
+        lastBearishBar  := bar_index
+    // If neither lastBullishBar nor lastBearishBar exists, don't track doji
+    // (This shouldn't happen in practice, but is safe to skip)
+
+// === Gap detection (simple session gap detection between consecutive bars)
+var bool gapActive = false
+var float gapHigh = na
+var float gapLow = na
+// Pending gap-wait states: when a break occurs into a gap, we store the OB
+// and wait until price prints inside the gap and a marker is found at/after that print.
+var bool pendingGapAwaitingBullish = false
+var bool pendingGapAwaitingBearish = false
+var float pendingGapRegionHigh = na
+var float pendingGapRegionLow = na
+var int gapFillBar = na  // Track when gap was filled for timeout
+// detect gap up
+if open > high[1]
+    gapActive := true
+    gapLow := high[1]
+    gapHigh := open
+// detect gap down
+if open < low[1]
+    gapActive := true
+    gapHigh := low[1]
+    gapLow := open
+// Clear gapActive once price prints into the gap region
+gapPrintNow = gapActive and not na(gapHigh) and not na(gapLow) and (high >= gapLow and low <= gapHigh)
+if gapPrintNow
+    // store the gap region locally for downstream checks before we clear it
+    pendingGapRegionHigh := gapHigh
+    pendingGapRegionLow := gapLow
+    gapFillBar := bar_index  // Track when gap was filled
+    gapActive := false
+    gapHigh := na
+    gapLow := na
+
+// === Break Detection ===
+// Bullish break: price breaks above last bearish high
+bullishBreak = not na(lastBearishHigh) and close > lastBearishHigh
+// Bearish break: price breaks below last bullish candle's body (open) OR low
+// This ensures we catch reversals even when the low is far below
+bearishBreak = not na(lastBullishOpen) and (close < lastBullishOpen or (not na(lastBullishLow) and close < lastBullishLow))
+
+// === Debug: Break Detection ===
+if f_isInDebugTimeframe()
+    if bullishBreak
+        label.new(bar_index, high, text="🔵 BREAK\nBullish", style=label.style_label_down, color=color.blue, textcolor=color.white, size=size.small)
+    if bearishBreak
+        label.new(bar_index, low, text="🔴 BREAK\nBearish", style=label.style_label_up, color=color.red, textcolor=color.white, size=size.small)
+
+// === Pending OB States ===
+var bool pendingBullish = false
+var float pendingBullishHigh = na
+var float pendingBullishLow  = na
+var int   pendingBullishBar  = na
+var int   pendingBullishConfirmationAttempt = na  // Track when confirmation was attempted
+
+var bool pendingBearish = false
+var float pendingBearishHigh = na
+var float pendingBearishLow  = na
+var int   pendingBearishBar  = na
+var int   pendingBearishConfirmationAttempt = na  // Track when confirmation was attempted
+
+// store marker type for awaiting confirmations (used later for labels)
+var string awaitingBullishMarkerType = "none"
+var string awaitingBearishMarkerType = "none"
+
+// === Wich OB Rule Tracking ===
+// Track if a bullish wick has touched the OB zone (prevents premature mitigation)
+var bool pendingBullishWickTouched = false
+var bool pendingBearishWickTouched = false
+var bool[] bullishOBWickTouched = array.new<bool>()
+var bool[] bearishOBWickTouched = array.new<bool>()
+
+// === OB Storage ===
+var bullishOBs = array.new<box>()
+var bearishOBs = array.new<box>()
+
+// === Mitigation Flags ===
+var bool bullishMitigated = false
+var bool bearishMitigated = false
+
+// === Sweep / Confirmation Variables (declared early for use in break detection) ===
+var bool awaitingBullishSweep = false
+var bool awaitingBearishSweep = false
+
+// === Set Pending OB on Break (with wick rule applied at detection) ===
+// IMPORTANT: Do NOT create new pending OB if awaiting OB is already active
+// This prevents overwriting stored values while awaiting sweep
+// Also prevent if gap-awaiting is active (same protection)
+if bullishBreak and not awaitingBullishSweep and not pendingGapAwaitingBullish
+    pendingBullish := true
+    // CRITICAL: Always use lastBearishBar (the LAST bearish candle, even if very small)
+    // This ensures we use the candle immediately before the bullish break, not an earlier one
+    pendingBullishBar  := lastBearishBar
+    // Apply wick rule immediately
+    int offset = bar_index - lastBearishBar
+    // Get the LAST bearish candle's data (even if body/wick is very small)
+    float refOpen = open[offset]
+    float refHigh = high[offset]
+    float refLow = low[offset]
+    float nextHigh = offset > 0 ? high[offset - 1] : na
+    // If wick extends above next candle, use open as top
+    if not na(nextHigh) and refHigh > nextHigh
+        pendingBullishHigh := refOpen
+    else
+        pendingBullishHigh := refHigh
+    pendingBullishLow := refLow
+    // === Debug: Pending Bullish OB Set ===
+    if f_isInDebugTimeframe()
+        label.new(bar_index, high, text="⏳ PENDING\nBullish OB\nBar: " + str.tostring(pendingBullishBar) + "\nH: " + str.tostring(pendingBullishHigh, "#.####") + "\nL: " + str.tostring(pendingBullishLow, "#.####") + "\n[PENDING VALUES]", style=label.style_label_down, color=color.blue, textcolor=color.white, size=size.small)
+        // Plot pending OB boundaries
+        if debugPlotLines
+            line.new(pendingBullishBar, pendingBullishHigh, bar_index, pendingBullishHigh, color=color.blue, width=2, style=line.style_dashed, extend=extend.right)
+            line.new(pendingBullishBar, pendingBullishLow, bar_index, pendingBullishLow, color=color.blue, width=2, style=line.style_dashed, extend=extend.right)
+
+// IMPORTANT: Do NOT create new pending OB if awaiting OB is already active
+// This prevents overwriting stored values while awaiting sweep
+// Also prevent if gap-awaiting is active (same protection)
+if bearishBreak and not awaitingBearishSweep and not pendingGapAwaitingBearish
+    pendingBearish := true
+    // CRITICAL: Always use lastBullishBar (the LAST bullish candle, even if very small)
+    // This ensures we use the candle immediately before the bearish break, not an earlier one
+    // IMPORTANT: Even if the last bullish candle has:
+    //   - Tiny body/wick (almost zero)
+    //   - NO top wick (high == close, meaning no upper wick)
+    //   - Very small body (close just slightly > open)
+    // we MUST use it because it's the actual last bullish candle before the break
+    if not na(lastBullishBar)
+        pendingBearishBar  := lastBullishBar
+        // Apply wick rule immediately
+        int offset = bar_index - lastBullishBar
+        // Verify offset is valid (should be >= 1, meaning the bullish candle is in the past)
+        if offset >= 1
+            // Get the LAST bullish candle's data (even if body/wick is very small or has no top wick)
+            float refOpen = open[offset]
+            float refHigh = high[offset]  // Use high even if it equals close (no top wick)
+            float refLow = low[offset]
+            float nextLow = offset > 0 ? low[offset - 1] : na
+            // If wick extends below next candle, use open as bottom
+            if not na(nextLow) and refLow < nextLow
+                pendingBearishLow := refOpen
+            else
+                pendingBearishLow := refLow
+            // IMPORTANT: Use refHigh even if it equals close (no top wick)
+            // OB with no top wick should still be valid
+            pendingBearishHigh := refHigh
+        else
+            // Invalid offset - this shouldn't happen, but clear pending if it does
+            pendingBearish := false
+    else
+        // No lastBullishBar - this shouldn't happen if bearishBreak is true, but clear pending
+        pendingBearish := false
+    // === Debug: Pending Bearish OB Set ===
+    if f_isInDebugTimeframe() and pendingBearish
+        label.new(bar_index, low, text="⏳ PENDING\nBearish OB\nBar: " + str.tostring(pendingBearishBar) + "\nH: " + str.tostring(pendingBearishHigh, "#.####") + "\nL: " + str.tostring(pendingBearishLow, "#.####") + "\n[PENDING VALUES]", style=label.style_label_up, color=color.red, textcolor=color.white, size=size.small)
+        // Plot pending OB boundaries
+        if debugPlotLines
+            line.new(pendingBearishBar, pendingBearishHigh, bar_index, pendingBearishHigh, color=color.red, width=2, style=line.style_dashed, extend=extend.right)
+            line.new(pendingBearishBar, pendingBearishLow, bar_index, pendingBearishLow, color=color.red, width=2, style=line.style_dashed, extend=extend.right)
+
+// === IMMEDIATE CANCELLATION: Cancel pending OB if same-direction candle touches it ===
+// Rule: "the bullish OB has a bullish candle to the right of it so it shouldn't be an OB"
+// This means: If a SAME-DIRECTION candle (bullish for bullish OB, bearish for bearish OB)
+// body or close touches the pending OB body, cancel it immediately
+// This check MUST run before marker validation and sweep logic
+if pendingBullish and not na(pendingBullishHigh) and not na(pendingBullishLow)
+    // For bullish OB: cancel if a BULLISH candle's body or close touches the OB body
+    // Check if current candle is bullish AND its body/close touches the pending OB zone
+    if isBullish
+        // Check if bullish candle's body (open/close) or close touches the OB body
+        // Check if bullish candle's body (open/close) or close touches the OB body
+        bool closeTouchesOB = close >= pendingBullishLow and close <= pendingBullishHigh
+        bool openTouchesOB = open >= pendingBullishLow and open <= pendingBullishHigh
+        bool bodyTouchesOB = closeTouchesOB or openTouchesOB
+        if bodyTouchesOB
+            // Same-direction (bullish) candle body/close touched the pending bullish OB - cancel immediately
+            // Store values for debug before clearing
+            float debugOBHigh = pendingBullishHigh
+            float debugOBLow = pendingBullishLow
+            pendingBullish := false
+            pendingBullishHigh := na
+            pendingBullishLow := na
+            pendingBullishBar := na
+            pendingBullishWickTouched := false
+            pendingBullishConfirmationAttempt := na
+            // === Debug: Immediate Cancellation ===
+            if f_isInDebugTimeframe()
+                string touchDetail = ""
+                if closeTouchesOB and openTouchesOB
+                    touchDetail := "Both O&C touch"
+                else if closeTouchesOB
+                    touchDetail := "Close touches"
+                else
+                    touchDetail := "Open touches"
+                label.new(bar_index, high, text="❌ CANCEL\nSame-direction\nBullish OB\n" + touchDetail + "\n[PENDING VALUES]\nOB H: " + str.tostring(debugOBHigh, "#.####") + "\nOB L: " + str.tostring(debugOBLow, "#.####") + "\nCandle O: " + str.tostring(open, "#.####") + "\nCandle C: " + str.tostring(close, "#.####") + "\nClose in OB: " + str.tostring(closeTouchesOB) + "\nOpen in OB: " + str.tostring(openTouchesOB), style=label.style_label_down, color=color.orange, textcolor=color.white, size=size.small)
+                // Plot OB zone boundaries
+                if debugPlotLines
+                    line.new(pendingBullishBar, debugOBHigh, bar_index, debugOBHigh, color=color.orange, width=3, style=line.style_dashed)
+                    line.new(pendingBullishBar, debugOBLow, bar_index, debugOBLow, color=color.orange, width=3, style=line.style_dashed)
+
+if pendingBearish and not na(pendingBearishHigh) and not na(pendingBearishLow)
+    // For bearish OB: cancel if a BEARISH candle's body or close touches the OB body
+    // Check if current candle is bearish AND its body/close touches the pending OB zone
+    if isBearish
+        // Check if bearish candle's body (open/close) or close touches the OB body
+        // Check if bearish candle's body (open/close) or close touches the OB body
+        bool closeTouchesOB = close >= pendingBearishLow and close <= pendingBearishHigh
+        bool openTouchesOB = open >= pendingBearishLow and open <= pendingBearishHigh
+        bool bodyTouchesOB = closeTouchesOB or openTouchesOB
+        if bodyTouchesOB
+            // Same-direction (bearish) candle body/close touched the pending bearish OB - cancel immediately
+            // Store values for debug before clearing
+            float debugOBHigh = pendingBearishHigh
+            float debugOBLow = pendingBearishLow
+            pendingBearish := false
+            pendingBearishHigh := na
+            pendingBearishLow := na
+            pendingBearishBar := na
+            pendingBearishWickTouched := false
+            pendingBearishConfirmationAttempt := na
+            // === Debug: Immediate Cancellation ===
+            if f_isInDebugTimeframe()
+                string touchDetail = ""
+                if closeTouchesOB and openTouchesOB
+                    touchDetail := "Both O&C touch"
+                else if closeTouchesOB
+                    touchDetail := "Close touches"
+                else
+                    touchDetail := "Open touches"
+                label.new(bar_index, low, text="❌ CANCEL\nSame-direction\nBearish OB\n" + touchDetail + "\n[PENDING VALUES]\nOB H: " + str.tostring(debugOBHigh, "#.####") + "\nOB L: " + str.tostring(debugOBLow, "#.####") + "\nCandle O: " + str.tostring(open, "#.####") + "\nCandle C: " + str.tostring(close, "#.####") + "\nClose in OB: " + str.tostring(closeTouchesOB) + "\nOpen in OB: " + str.tostring(openTouchesOB), style=label.style_label_up, color=color.orange, textcolor=color.white, size=size.small)
+                // Plot OB zone boundaries
+                if debugPlotLines
+                    line.new(pendingBearishBar, debugOBHigh, bar_index, debugOBHigh, color=color.orange, width=3, style=line.style_dashed)
+                    line.new(pendingBearishBar, debugOBLow, bar_index, debugOBLow, color=color.orange, width=3, style=line.style_dashed)
+
+// === Track bullish wick touches to pending OBs (Wich OB Rule) ===
+if pendingBullish and not na(pendingBullishHigh) and not na(pendingBullishLow)
+    // Check if bullish wick touches the OB zone
+    if isBullish and low <= pendingBullishHigh and low >= pendingBullishLow
+        pendingBullishWickTouched := true
+
+if pendingBearish and not na(pendingBearishHigh) and not na(pendingBearishLow)
+    // Check if bearish wick touches the OB zone (for bearish OB, we track bearish wick)
+    if isBearish and high >= pendingBearishLow and high <= pendingBearishHigh
+        pendingBearishWickTouched := true
+
+// === Pre-sweep Mitigation rule before confirmation (with Wich OB Rule) ===
+// IMPORTANT: When an OB is mitigated before confirmation, we should still draw it
+// with mitigated styling if showMitigatedMarkers is enabled
+if pendingBullish and not na(pendingBullishHigh) and not na(pendingBullishLow)
+    // Wich OB Rule: OB is still valid if a bullish wick touched it first
+    // Only mitigate if NO bullish wick has touched, AND price tags OB and closes bearish
+    if low <= pendingBullishHigh and high >= pendingBullishLow and isBearish and not pendingBullishWickTouched
+        // Store OB data before clearing
+        float mitigatedHigh = pendingBullishHigh
+        float mitigatedLow = pendingBullishLow
+        int mitigatedBar = pendingBullishBar
+        
+        // Clear pending state
+        pendingBullish := false
+        pendingBullishHigh := na
+        pendingBullishLow := na
+        pendingBullishBar := na
+        pendingBullishWickTouched := false
+        bullishMitigated := true
+        
+        // Draw mitigated OB if showMitigatedMarkers is enabled
+        if showMitigatedMarkers and not na(mitigatedBar) and showBullishOB
+            mitigatedBox = box.new(mitigatedBar, mitigatedHigh, bar_index, mitigatedLow, border_color=bullishMitigatedBorder, bgcolor=color.new(bullishOBColor, bullishMitigatedFade))
+            array.push(bullishOBs, mitigatedBox)
+            // Initialize wick touched tracking (already mitigated, so set to false)
+            array.push(bullishOBWickTouched, false)
+            if showOBLabel
+                label.new(bar_index, high, text="OB: Mitigated", style=label.style_label_down, color=bullishMitigatedBorder, textcolor=color.white)
+        
+        // === Debug: Pre-sweep Mitigation ===
+        if f_isInDebugTimeframe()
+            label.new(bar_index, high, text="⚠️ MITIGATED\nPre-sweep\nBearish close", style=label.style_label_down, color=color.yellow, textcolor=color.black, size=size.small)
+        
+        alert("Pending Bullish OB mitigated before sweep (bearish close).", alert.freq_once_per_bar)
+
+if pendingBearish and not na(pendingBearishHigh) and not na(pendingBearishLow)
+    // For bearish OB, we check if bearish wick touched first (opposite logic)
+    // Only mitigate if NO bearish wick has touched, AND price tags OB and closes bullish
+    if high >= pendingBearishLow and low <= pendingBearishHigh and isBullish and not pendingBearishWickTouched
+        // Store OB data before clearing
+        float mitigatedHigh = pendingBearishHigh
+        float mitigatedLow = pendingBearishLow
+        int mitigatedBar = pendingBearishBar
+        
+        // Clear pending state
+        pendingBearish := false
+        pendingBearishHigh := na
+        pendingBearishLow := na
+        pendingBearishBar := na
+        pendingBearishWickTouched := false
+        bearishMitigated := true
+        
+        // Draw mitigated OB if showMitigatedMarkers is enabled
+        if showMitigatedMarkers and not na(mitigatedBar) and showBearishOB
+            mitigatedBox = box.new(mitigatedBar, mitigatedHigh, bar_index, mitigatedLow, border_color=bearishMitigatedBorder, bgcolor=color.new(bearishOBColor, bearishMitigatedFade))
+            array.push(bearishOBs, mitigatedBox)
+            // Initialize wick touched tracking (already mitigated, so set to false)
+            array.push(bearishOBWickTouched, false)
+            if showOBLabel
+                label.new(bar_index, low, text="OB: Mitigated", style=label.style_label_up, color=bearishMitigatedBorder, textcolor=color.white)
+        
+        // === Debug: Pre-sweep Mitigation ===
+        if f_isInDebugTimeframe()
+            label.new(bar_index, low, text="⚠️ MITIGATED\nPre-sweep\nBullish close", style=label.style_label_up, color=color.yellow, textcolor=color.black, size=size.small)
+        
+        alert("Pending Bearish OB mitigated before sweep (bullish close).", alert.freq_once_per_bar)
+
+
+// === Sweep / Confirmation Variables (continued - stored values) ===
+var float awaitingBullishStoredHigh = na
+var float awaitingBullishStoredLow  = na
+var int   awaitingBullishStoredBar  = na
+var float confirmBullHigh = na
+var float confirmBullLow  = na
+var int   confirmBullBar  = na
+
+var float awaitingBearishStoredHigh = na
+var float awaitingBearishStoredLow  = na
+var int   awaitingBearishStoredBar  = na
+var float confirmBearHigh = na
+var float confirmBearLow  = na
+var int   confirmBearBar  = na
+
+// === Extra sweep candidates ===
+var float extraBearishHigh = na
+var float extraBullishLow  = na
+
+// === On-confirmation: store confirmation candle and wait for sweep ===
+// MODIFIED: Now includes marker validation gate
+// IMPORTANT: Only confirm if OB hasn't been mitigated
+// If a bearish candle appears that should mitigate the OB, it should have already been mitigated
+// in the pre-sweep mitigation section above, so pendingBullish would be false
+if pendingBullish and barstate.isconfirmed and isBearish
+    // Distance check: if enabled, verify distance is within maxDistance; if disabled, always pass
+    distanceValidBull = not enableDistanceCheck or (not na(pendingBullishHigh) and math.abs(low - pendingBullishHigh) <= maxDistance)
+    // If there is an active gap we must defer finalizing the OB until
+    // price actually prints inside the gap region. Store the candidate
+    // and wait for the first print-in-gap event to validate marker there.
+    if distanceValidBull
+        if gapActive
+            // store awaiting values but DO NOT start sweep-waiting yet
+            awaitingBullishStoredHigh := pendingBullishHigh
+            awaitingBullishStoredLow  := pendingBullishLow
+            awaitingBullishStoredBar  := pendingBullishBar
+            // mark that we are waiting for the gap to be printed into
+            pendingGapAwaitingBullish := true
+            // keep the gap region for later intersection check
+            pendingGapRegionHigh := gapHigh
+            pendingGapRegionLow := gapLow
+            pendingBullish := false
+        else
+            // === MARKER VALIDATION GATE ===
+            // Check if current bar + previous bars form a valid marker pattern
+            [markerIsValid, markerLow, markerHigh, markerType] = f_isValidMarker()
+            // If marker validation is enabled (either straight or swing), require one to pass
+            markerCheckPassed = not (useStraightMarker or useSwingMarker) or markerIsValid
+            if markerCheckPassed
+                awaitingBullishStoredHigh := pendingBullishHigh
+                awaitingBullishStoredLow  := pendingBullishLow
+                awaitingBullishStoredBar  := pendingBullishBar
+                confirmBullHigh := high
+                confirmBullLow  := low
+                confirmBullBar := bar_index
+                awaitingBullishSweep := true
+                extraBearishHigh := na
+                awaitingBullishMarkerType := markerType
+                // Reset wick touched flag for next OB
+                pendingBullishWickTouched := false
+                pendingBullish := false
+                pendingBullishConfirmationAttempt := na
+                // === Debug: Confirmation (Marker Validated) ===
+                if f_isInDebugTimeframe()
+                    label.new(bar_index, low, text="✅ CONFIRMED\nMarker: " + markerType + "\nAwaiting sweep", style=label.style_label_up, color=color.green, textcolor=color.white, size=size.small)
+            // If marker validation fails but distance is valid, keep pending for a few more bars
+            // to allow marker pattern to form (max 3 bars from confirmation attempt)
+            else
+                // Track when confirmation was attempted
+                if na(pendingBullishConfirmationAttempt)
+                    pendingBullishConfirmationAttempt := bar_index
+                // Keep pending for up to 3 bars from confirmation attempt
+                if bar_index - pendingBullishConfirmationAttempt <= 3
+                    pendingBullish := true
+                    // === Debug: Waiting for Marker ===
+                    if f_isInDebugTimeframe()
+                        label.new(bar_index, low, text="⏸️ WAITING\nMarker not found\nRetry: " + str.tostring(bar_index - pendingBullishConfirmationAttempt) + "/3", style=label.style_label_up, color=color.gray, textcolor=color.white, size=size.small)
+                else
+                    // Timeout - clear pending after 3 bars from confirmation attempt
+                    pendingBullish := false
+                    pendingBullishConfirmationAttempt := na
+                    // === Debug: Marker Timeout ===
+                    if f_isInDebugTimeframe()
+                        label.new(bar_index, low, text="⏸️ TIMEOUT\nMarker not found\nOB cancelled", style=label.style_label_up, color=color.red, textcolor=color.white, size=size.small)
+    else
+        // Distance invalid - clear pending
+        pendingBullish := false
+        pendingBullishConfirmationAttempt := na
+        // === Debug: Distance Invalid ===
+        if f_isInDebugTimeframe()
+            label.new(bar_index, low, text="❌ DISTANCE\nToo far\nOB cancelled", style=label.style_label_up, color=color.red, textcolor=color.white, size=size.small)
+
+// IMPORTANT: Only confirm if OB hasn't been mitigated
+// If a bullish candle appears that should mitigate the OB, it should have already been mitigated
+// in the pre-sweep mitigation section above, so pendingBearish would be false
+if pendingBearish and barstate.isconfirmed and isBullish
+    if gapActive
+        awaitingBearishStoredHigh := pendingBearishHigh
+        awaitingBearishStoredLow  := pendingBearishLow
+        awaitingBearishStoredBar  := pendingBearishBar
+        pendingGapAwaitingBearish := true
+        pendingGapRegionHigh := gapHigh
+        pendingGapRegionLow := gapLow
+        pendingBearish := false
+    else
+        // === MARKER VALIDATION GATE ===
+        [markerIsValid, markerLow, markerHigh, markerType] = f_isValidMarker()
+        markerCheckPassed = not (useStraightMarker or useSwingMarker) or markerIsValid
+        if markerCheckPassed
+            // Store values for debug before assignment
+            float debugPendingHigh = pendingBearishHigh
+            float debugPendingLow = pendingBearishLow
+            awaitingBearishStoredHigh := pendingBearishHigh
+            awaitingBearishStoredLow  := pendingBearishLow
+            awaitingBearishStoredBar  := pendingBearishBar
+            confirmBearHigh := high
+            confirmBearLow  := low
+            confirmBearBar := bar_index
+            awaitingBearishSweep := true
+            extraBullishLow := na
+            awaitingBearishMarkerType := markerType
+            // Reset wick touched flag for next OB
+            pendingBearishWickTouched := false
+            pendingBearish := false
+            pendingBearishConfirmationAttempt := na
+            // === Debug: Confirmation (Marker Validated) ===
+            if f_isInDebugTimeframe()
+                label.new(bar_index, high, text="✅ CONFIRMED\nMarker: " + markerType + "\nAwaiting sweep\nPENDING→STORED\nH: " + str.tostring(debugPendingHigh, "#.####") + "→" + str.tostring(awaitingBearishStoredHigh, "#.####") + "\nL: " + str.tostring(debugPendingLow, "#.####") + "→" + str.tostring(awaitingBearishStoredLow, "#.####"), style=label.style_label_down, color=color.green, textcolor=color.white, size=size.small)
+                // Plot stored OB boundaries
+                if debugPlotLines
+                    line.new(awaitingBearishStoredBar, awaitingBearishStoredHigh, bar_index + 10, awaitingBearishStoredHigh, color=color.green, width=3, style=line.style_solid, extend=extend.right)
+                    line.new(awaitingBearishStoredBar, awaitingBearishStoredLow, bar_index + 10, awaitingBearishStoredLow, color=color.green, width=3, style=line.style_solid, extend=extend.right)
+        // If marker validation fails, keep pending for a few more bars
+        // to allow marker pattern to form (max 3 bars from confirmation attempt)
+        else
+            // Track when confirmation was attempted
+            if na(pendingBearishConfirmationAttempt)
+                pendingBearishConfirmationAttempt := bar_index
+            // Keep pending for up to 3 bars from confirmation attempt
+            if bar_index - pendingBearishConfirmationAttempt <= 3
+                pendingBearish := true
+                // === Debug: Waiting for Marker ===
+                if f_isInDebugTimeframe()
+                    label.new(bar_index, high, text="⏸️ WAITING\nMarker not found\nRetry: " + str.tostring(bar_index - pendingBearishConfirmationAttempt) + "/3", style=label.style_label_down, color=color.gray, textcolor=color.white, size=size.small)
+            else
+                // Timeout - clear pending after 3 bars from confirmation attempt
+                pendingBearish := false
+                pendingBearishConfirmationAttempt := na
+                // === Debug: Marker Timeout ===
+                if f_isInDebugTimeframe()
+                    label.new(bar_index, high, text="⏸️ TIMEOUT\nMarker not found\nOB cancelled", style=label.style_label_down, color=color.red, textcolor=color.white, size=size.small)
+
+// === Capture opposite candle after confirmation ===
+if awaitingBullishSweep and na(extraBearishHigh) and isBearish and high < confirmBullHigh
+    extraBearishHigh := na(extraBearishHigh) ? high : math.max(extraBearishHigh, high)
+
+if awaitingBearishSweep and na(extraBullishLow) and isBullish and low > confirmBearLow
+    extraBullishLow := na(extraBullishLow) ? low : math.min(extraBullishLow, low)
+
+// === Sweep Detection (includes Partial Break validation) ===
+bullishSweepCond1 = not na(confirmBullHigh) and high > confirmBullHigh
+bullishSweepCond2 = not na(extraBearishHigh) and high > extraBearishHigh
+bullishPBValid = awaitingBullishSweep and not na(confirmBullBar) and f_checkPartialBreakBullish(awaitingBullishStoredHigh, awaitingBullishStoredLow, confirmBullBar)
+bullishSweepHappened = awaitingBullishSweep and (bullishSweepCond1 or bullishSweepCond2 or bullishPBValid)
+
+bearishSweepCond1 = not na(confirmBearLow) and low < confirmBearLow
+bearishSweepCond2 = not na(extraBullishLow) and low < extraBullishLow
+bearishPBValid = awaitingBearishSweep and not na(confirmBearBar) and f_checkPartialBreakBearish(awaitingBearishStoredHigh, awaitingBearishStoredLow, confirmBearBar)
+bearishSweepHappened = awaitingBearishSweep and (bearishSweepCond1 or bearishSweepCond2 or bearishPBValid)
+
+// === Debug: Sweep Detection ===
+if f_isInDebugTimeframe()
+    if bullishSweepHappened
+        sweepType = bullishSweepCond1 ? "Sweep1" : (bullishSweepCond2 ? "Sweep2" : "PB")
+        label.new(bar_index, high, text="🚀 SWEEP\n" + sweepType + "\nOB will be drawn", style=label.style_label_down, color=color.lime, textcolor=color.black, size=size.small)
+    if bearishSweepHappened
+        sweepType = bearishSweepCond1 ? "Sweep1" : (bearishSweepCond2 ? "Sweep2" : "PB")
+        label.new(bar_index, low, text="🚀 SWEEP\n" + sweepType + "\nOB will be drawn", style=label.style_label_up, color=color.lime, textcolor=color.black, size=size.small)
+
+// === IMMEDIATE CANCELLATION for Awaiting Stored OBs ===
+// Rule: If a same-direction candle's body or close touches an awaiting OB (waiting for sweep), cancel it immediately
+// This is a hard stop - no sweep detection, no further validation
+// For bullish OB: cancel if bullish candle body/close touches
+// For bearish OB: cancel if bearish candle body/close touches
+if awaitingBullishSweep and not na(awaitingBullishStoredHigh) and not na(awaitingBullishStoredLow)
+    // For awaiting bullish OB: cancel if a BULLISH candle's body or close touches the stored OB zone
+    if isBullish
+        // Check if bullish candle's body (open/close) or close touches the OB body
+        bool closeTouchesOB = close >= awaitingBullishStoredLow and close <= awaitingBullishStoredHigh
+        bool openTouchesOB = open >= awaitingBullishStoredLow and open <= awaitingBullishStoredHigh
+        bool bodyTouchesOB = closeTouchesOB or openTouchesOB
+        if bodyTouchesOB
+            // Same-direction (bullish) candle body/close touched the awaiting bullish OB - cancel immediately
+            // Store values for debug before clearing
+            float debugOBHigh = awaitingBullishStoredHigh
+            float debugOBLow = awaitingBullishStoredLow
+            awaitingBullishSweep := false
+            awaitingBullishStoredHigh := na
+            awaitingBullishStoredLow := na
+            awaitingBullishStoredBar := na
+            confirmBullHigh := na
+            confirmBullLow := na
+            confirmBullBar := na
+            extraBearishHigh := na
+            awaitingBullishMarkerType := "none"
+            array.clear(bullishOBWickTouched)
+            // === Debug: Immediate Cancellation for Awaiting OB ===
+            if f_isInDebugTimeframe()
+                string touchDetail = ""
+                if closeTouchesOB and openTouchesOB
+                    touchDetail := "Both O&C touch"
+                else if closeTouchesOB
+                    touchDetail := "Close touches"
+                else
+                    touchDetail := "Open touches"
+                label.new(bar_index, high, text="❌ CANCEL\nAwaiting OB\nSame-direction\nBullish OB\n" + touchDetail + "\n[STORED VALUES]\nOB H: " + str.tostring(debugOBHigh, "#.####") + "\nOB L: " + str.tostring(debugOBLow, "#.####") + "\nCandle O: " + str.tostring(open, "#.####") + "\nCandle C: " + str.tostring(close, "#.####") + "\nClose in OB: " + str.tostring(closeTouchesOB) + "\nOpen in OB: " + str.tostring(openTouchesOB), style=label.style_label_down, color=color.orange, textcolor=color.white, size=size.small)
+                // Plot OB zone boundaries
+                if debugPlotLines
+                    line.new(awaitingBullishStoredBar, debugOBHigh, bar_index, debugOBHigh, color=color.orange, width=3, style=line.style_dashed)
+                    line.new(awaitingBullishStoredBar, debugOBLow, bar_index, debugOBLow, color=color.orange, width=3, style=line.style_dashed)
+
+if awaitingBearishSweep and not na(awaitingBearishStoredHigh) and not na(awaitingBearishStoredLow)
+    // For awaiting bearish OB: cancel if a BEARISH candle's body or close touches the stored OB zone
+    if isBearish
+        // Check if bearish candle's body (open/close) or close touches the OB body
+        bool closeTouchesOB = close >= awaitingBearishStoredLow and close <= awaitingBearishStoredHigh
+        bool openTouchesOB = open >= awaitingBearishStoredLow and open <= awaitingBearishStoredHigh
+        bool bodyTouchesOB = closeTouchesOB or openTouchesOB
+        if bodyTouchesOB
+            // Same-direction (bearish) candle body/close touched the awaiting bearish OB - cancel immediately
+            // Store values for debug before clearing
+            float debugOBHigh = awaitingBearishStoredHigh
+            float debugOBLow = awaitingBearishStoredLow
+            awaitingBearishSweep := false
+            awaitingBearishStoredHigh := na
+            awaitingBearishStoredLow := na
+            awaitingBearishStoredBar := na
+            confirmBearHigh := na
+            confirmBearLow := na
+            confirmBearBar := na
+            extraBullishLow := na
+            awaitingBearishMarkerType := "none"
+            array.clear(bearishOBWickTouched)
+            // === Debug: Immediate Cancellation for Awaiting OB ===
+            if f_isInDebugTimeframe()
+                string touchDetail = ""
+                if closeTouchesOB and openTouchesOB
+                    touchDetail := "Both O&C touch"
+                else if closeTouchesOB
+                    touchDetail := "Close touches"
+                else
+                    touchDetail := "Open touches"
+                label.new(bar_index, low, text="❌ CANCEL\nAwaiting OB\nSame-direction\nBearish OB\n" + touchDetail + "\n[STORED VALUES]\nOB H: " + str.tostring(debugOBHigh, "#.####") + "\nOB L: " + str.tostring(debugOBLow, "#.####") + "\nCandle O: " + str.tostring(open, "#.####") + "\nCandle C: " + str.tostring(close, "#.####") + "\nClose in OB: " + str.tostring(closeTouchesOB) + "\nOpen in OB: " + str.tostring(openTouchesOB), style=label.style_label_up, color=color.orange, textcolor=color.white, size=size.small)
+                // Plot OB zone boundaries
+                if debugPlotLines
+                    line.new(awaitingBearishStoredBar, debugOBHigh, bar_index, debugOBHigh, color=color.orange, width=3, style=line.style_dashed)
+                    line.new(awaitingBearishStoredBar, debugOBLow, bar_index, debugOBLow, color=color.orange, width=3, style=line.style_dashed)
+
+// === Track bullish wick touches to awaiting stored OBs (Wich OB Rule) ===
+if awaitingBullishSweep and not na(awaitingBullishStoredHigh) and not na(awaitingBullishStoredLow)
+    // Check if bullish wick touches the stored OB zone
+    if isBullish and low <= awaitingBullishStoredHigh and low >= awaitingBullishStoredLow
+        // Mark that a bullish wick has touched (prevents premature mitigation)
+        if array.size(bullishOBWickTouched) == 0
+            array.push(bullishOBWickTouched, true)
+        else
+            array.set(bullishOBWickTouched, 0, true)
+
+if awaitingBearishSweep and not na(awaitingBearishStoredHigh) and not na(awaitingBearishStoredLow)
+    // For bearish OB, check if bearish wick touches the stored OB zone
+    if isBearish and high >= awaitingBearishStoredLow and high <= awaitingBearishStoredHigh
+        // Mark that a bearish wick has touched (prevents premature mitigation)
+        if array.size(bearishOBWickTouched) == 0
+            array.push(bearishOBWickTouched, true)
+        else
+            array.set(bearishOBWickTouched, 0, true)
+
+// === Mitigation Check for Awaiting Stored Bars (with Wich OB Rule) ===
+if awaitingBullishSweep and not na(awaitingBullishStoredHigh) and not na(awaitingBullishStoredLow) and not na(confirmBullBar) and bar_index > confirmBullBar
+    // Wich OB Rule: Only mitigate if NO bullish wick has touched first
+    bool wickTouched = false
+    if array.size(bullishOBWickTouched) > 0
+        wickTouched := array.get(bullishOBWickTouched, 0)
+    if low <= awaitingBullishStoredHigh and not wickTouched
+        // Store values for debug before clearing
+        float debugOBHigh = awaitingBullishStoredHigh
+        float debugOBLow = awaitingBullishStoredLow
+        float debugCandleLow = low
+        awaitingBullishSweep := false
+        awaitingBullishStoredHigh := na
+        awaitingBullishStoredLow := na
+        awaitingBullishStoredBar := na
+        confirmBullHigh := na
+        confirmBullLow := na
+        confirmBullBar := na
+        extraBearishHigh := na
+        array.clear(bullishOBWickTouched)
+        // === Debug: Mitigation Cancellation for Awaiting OB ===
+        if f_isInDebugTimeframe()
+            label.new(bar_index, debugCandleLow, text="❌ CANCEL\nAwaiting OB\nRule: Mitigation\nOpposite-direction\nclose touched\nWich OB: " + str.tostring(wickTouched) + "\nOB H: " + str.tostring(debugOBHigh, "#.####") + "\nOB L: " + str.tostring(debugOBLow, "#.####") + "\nCandle Low: " + str.tostring(debugCandleLow, "#.####"), style=label.style_label_up, color=color.red, textcolor=color.white, size=size.small)
+
+if awaitingBearishSweep and not na(awaitingBearishStoredLow) and not na(confirmBearBar) and bar_index > confirmBearBar
+    // Wich OB Rule: Only mitigate if NO bearish wick has touched first
+    bool wickTouched = false
+    if array.size(bearishOBWickTouched) > 0
+        wickTouched := array.get(bearishOBWickTouched, 0)
+    if high >= awaitingBearishStoredLow and not wickTouched
+        // Store values for debug before clearing
+        float debugOBHigh = awaitingBearishStoredHigh
+        float debugOBLow = awaitingBearishStoredLow
+        float debugCandleHigh = high
+        awaitingBearishSweep := false
+        awaitingBearishStoredHigh := na
+        awaitingBearishStoredLow := na
+        awaitingBearishStoredBar := na
+        confirmBearHigh := na
+        confirmBearLow := na
+        confirmBearBar := na
+        extraBullishLow := na
+        array.clear(bearishOBWickTouched)
+        // === Debug: Mitigation Cancellation for Awaiting OB ===
+        if f_isInDebugTimeframe()
+            label.new(bar_index, debugCandleHigh, text="❌ CANCEL\nAwaiting OB\nRule: Mitigation\nOpposite-direction\nclose touched\nWich OB: " + str.tostring(wickTouched) + "\nOB H: " + str.tostring(debugOBHigh, "#.####") + "\nOB L: " + str.tostring(debugOBLow, "#.####") + "\nCandle High: " + str.tostring(debugCandleHigh, "#.####"), style=label.style_label_down, color=color.red, textcolor=color.white, size=size.small)
+
+
+// === Draw OBs (levels already have wick rule applied + marker validation) ===
+// Distance check happens HERE, at the final marker candle (right blue candle) when OB is drawn
+if bullishSweepHappened and not na(awaitingBullishStoredBar) and showBullishOB
+    // Note: Gap logic is handled during confirmation, not at draw time
+    // If OB was stored during gap, it will be drawn when gap is filled (handled in gapPrintNow section)
+    // Otherwise, draw it normally
+    allowDraw = true
+    // Only check gap intersection if we're in a gap-awaiting state
+    if pendingGapAwaitingBullish
+        // If still waiting for gap fill, don't draw yet (will be drawn in gapPrintNow)
+        allowDraw := false
+    if allowDraw
+        // Distance check: if enabled, verify distance from OB to final marker candle (current bar)
+        // This is the RIGHT blue candle where OB is actually drawn
+        distanceValidBull = not enableDistanceCheck or (not na(awaitingBullishStoredHigh) and math.abs(awaitingBullishStoredHigh - low) <= maxDistance)
+        if distanceValidBull
+            bullishBox = box.new(awaitingBullishStoredBar, awaitingBullishStoredHigh, bar_index, awaitingBullishStoredLow, border_color=bullishOBBorder, bgcolor=bullishOBColor)
+            array.push(bullishOBs, bullishBox)
+            // Initialize wick touched tracking for this OB (Wich OB Rule)
+            array.push(bullishOBWickTouched, false)
+            // optional label with marker type
+            if showOBLabel and awaitingBullishMarkerType != "none"
+                label.new(bar_index, high, text="OB: " + awaitingBullishMarkerType, style=label.style_label_down, color=bullishOBBorder, textcolor=color.white)
+            // === Debug: OB Drawn ===
+            if f_isInDebugTimeframe()
+                label.new(bar_index, high, text="📦 OB DRAWN\nBullish\nBar: " + str.tostring(awaitingBullishStoredBar) + "\nMarker: " + awaitingBullishMarkerType, style=label.style_label_down, color=color.blue, textcolor=color.white, size=size.small)
+            alert("Bullish OB confirmed (wick rule + marker validation passed)!", alert.freq_once_per_bar)
+        else
+            // Distance invalid at final marker - cancel OB
+            awaitingBullishSweep := false
+            awaitingBullishStoredHigh := na
+            awaitingBullishStoredLow := na
+            awaitingBullishStoredBar := na
+            confirmBullHigh := na
+            confirmBullLow := na
+            confirmBullBar := na
+            array.clear(bullishOBWickTouched)
+            // === Debug: Distance Invalid (At Final Marker) ===
+            if f_isInDebugTimeframe()
+                label.new(bar_index, high, text="❌ DISTANCE\nToo far\nOB cancelled\n(At final marker)", style=label.style_label_down, color=color.red, textcolor=color.white, size=size.small)
+        awaitingBullishSweep := false
+        // Clear awaiting wick touched flag
+        array.clear(bullishOBWickTouched)
+
+if bearishSweepHappened and not na(awaitingBearishStoredBar) and showBearishOB
+    // Note: Gap logic is handled during confirmation, not at draw time
+    // If OB was stored during gap, it will be drawn when gap is filled (handled in gapPrintNow section)
+    // Otherwise, draw it normally
+    allowDraw = true
+    // Only check gap intersection if we're in a gap-awaiting state
+    if pendingGapAwaitingBearish
+        // If still waiting for gap fill, don't draw yet (will be drawn in gapPrintNow)
+        allowDraw := false
+    if allowDraw
+        // Distance check: if enabled, verify distance from OB to final marker candle (current bar)
+        // This is the RIGHT blue candle where OB is actually drawn
+        distanceValidBear = not enableDistanceCheck or (not na(awaitingBearishStoredLow) and math.abs(awaitingBearishStoredLow - high) <= maxDistance)
+        if distanceValidBear
+            bearishBox = box.new(awaitingBearishStoredBar, awaitingBearishStoredHigh, bar_index, awaitingBearishStoredLow, border_color=bearishOBBorder, bgcolor=bearishOBColor)
+            array.push(bearishOBs, bearishBox)
+            // Initialize wick touched tracking for this OB (Wich OB Rule)
+            array.push(bearishOBWickTouched, false)
+            if showOBLabel and awaitingBearishMarkerType != "none"
+                label.new(bar_index, low, text="OB: " + awaitingBearishMarkerType, style=label.style_label_up, color=bearishOBBorder, textcolor=color.white)
+            // === Debug: OB Drawn ===
+            if f_isInDebugTimeframe()
+                label.new(bar_index, low, text="📦 OB DRAWN\nBearish\nBar: " + str.tostring(awaitingBearishStoredBar) + "\nMarker: " + awaitingBearishMarkerType, style=label.style_label_up, color=color.red, textcolor=color.white, size=size.small)
+            alert("Bearish OB confirmed (wick rule + marker validation passed)!", alert.freq_once_per_bar)
+        else
+            // Distance invalid at final marker - cancel OB
+            awaitingBearishSweep := false
+            awaitingBearishStoredHigh := na
+            awaitingBearishStoredLow := na
+            awaitingBearishStoredBar := na
+            confirmBearHigh := na
+            confirmBearLow := na
+            confirmBearBar := na
+            array.clear(bearishOBWickTouched)
+            // === Debug: Distance Invalid (At Final Marker) ===
+            if f_isInDebugTimeframe()
+                label.new(bar_index, low, text="❌ DISTANCE\nToo far\nOB cancelled\n(At final marker)", style=label.style_label_up, color=color.red, textcolor=color.white, size=size.small)
+        awaitingBearishSweep := false
+        // Clear awaiting wick touched flag
+        array.clear(bearishOBWickTouched)
+
+// === Handle gap-first-print event: when price first prints into a gap region
+// we finalize any stored OB candidates that were deferred earlier.
+// Also check for markers in subsequent bars after gap is filled (up to maxLookback bars)
+// Note: gapFillBar is set when gapPrintNow triggers (line 330)
+// We continuously check for markers after gap fill (not just at gapPrintNow moment)
+
+// Check for gap-awaiting OBs even after gapPrintNow (for a few bars)
+// This allows marker to be found after gap is filled, as per documentation
+if pendingGapAwaitingBullish and not na(awaitingBullishStoredBar)
+    // IMMEDIATE CANCELLATION: If same-direction candle body/close touches gap-awaiting OB, cancel it
+    bool cancelled = false
+    if isBullish and not na(awaitingBullishStoredHigh) and not na(awaitingBullishStoredLow)
+        // Check if bullish candle's body (open/close) or close touches the OB body
+        bool closeTouchesOB = close >= awaitingBullishStoredLow and close <= awaitingBullishStoredHigh
+        bool openTouchesOB = open >= awaitingBullishStoredLow and open <= awaitingBullishStoredHigh
+        bool bodyTouchesOB = closeTouchesOB or openTouchesOB
+        if bodyTouchesOB
+            // Same-direction candle body/close touched - cancel immediately
+            // Store values for debug before clearing
+            float debugOBHigh = awaitingBullishStoredHigh
+            float debugOBLow = awaitingBullishStoredLow
+            pendingGapAwaitingBullish := false
+            awaitingBullishStoredHigh := na
+            awaitingBullishStoredLow := na
+            awaitingBullishStoredBar := na
+            pendingGapRegionHigh := na
+            pendingGapRegionLow := na
+            gapFillBar := na
+            awaitingBullishMarkerType := "none"
+            cancelled := true
+            // === Debug: Gap-Awaiting OB Cancellation ===
+            if f_isInDebugTimeframe()
+                string touchDetail = ""
+                if closeTouchesOB and openTouchesOB
+                    touchDetail := "Both O&C touch"
+                else if closeTouchesOB
+                    touchDetail := "Close touches"
+                else
+                    touchDetail := "Open touches"
+                label.new(bar_index, high, text="❌ CANCEL\nGap-Awaiting OB\nSame-direction\nBullish OB\n" + touchDetail + "\nOB: " + str.tostring(debugOBLow, "#.####") + "-" + str.tostring(debugOBHigh, "#.####") + "\nCandle O: " + str.tostring(open, "#.####") + "\nCandle C: " + str.tostring(close, "#.####") + "\nClose in OB: " + str.tostring(closeTouchesOB) + "\nOpen in OB: " + str.tostring(openTouchesOB), style=label.style_label_down, color=color.orange, textcolor=color.white, size=size.small)
+                // Plot OB zone boundaries
+                if debugPlotLines
+                    line.new(bar_index - 1, debugOBHigh, bar_index + 1, debugOBHigh, color=color.orange, width=2, style=line.style_dashed)
+                    line.new(bar_index - 1, debugOBLow, bar_index + 1, debugOBLow, color=color.orange, width=2, style=line.style_dashed)
+    
+    // Only continue with marker validation if not cancelled
+    if not cancelled
+        // Ensure stored OB intersects the recorded gap region
+        intersects = not na(pendingGapRegionHigh) and not na(pendingGapRegionLow) and (awaitingBullishStoredHigh >= pendingGapRegionLow and awaitingBullishStoredLow <= pendingGapRegionHigh)
+        if intersects
+            // Check for marker at current bar (can be found even after gap is filled)
+            [markerIsValid, markerLow, markerHigh, markerType] = f_isValidMarker()
+            if not (useStraightMarker or useSwingMarker) or markerIsValid
+                // finalize as if confirmation just happened here
+                confirmBullHigh := high
+                confirmBullLow := low
+                confirmBullBar := bar_index
+                awaitingBullishSweep := true
+                awaitingBullishMarkerType := markerType
+                // Clear gap-awaiting flag once marker is found
+                pendingGapAwaitingBullish := false
+                pendingGapRegionHigh := na
+                pendingGapRegionLow := na
+                gapFillBar := na
+            // If marker not found yet, keep waiting (but timeout after maxLookback bars from gap fill)
+            else if not na(gapFillBar) and bar_index - gapFillBar > maxLookback
+                // Timeout - clear gap-awaiting after maxLookback bars
+                pendingGapAwaitingBullish := false
+                pendingGapRegionHigh := na
+                pendingGapRegionLow := na
+                gapFillBar := na
+
+if pendingGapAwaitingBearish and not na(awaitingBearishStoredBar)
+    // IMMEDIATE CANCELLATION: If same-direction candle body/close touches gap-awaiting OB, cancel it
+    bool cancelled = false
+    if isBearish and not na(awaitingBearishStoredHigh) and not na(awaitingBearishStoredLow)
+        // Check if bearish candle's body (open/close) or close touches the OB body
+        bool closeTouchesOB = close >= awaitingBearishStoredLow and close <= awaitingBearishStoredHigh
+        bool openTouchesOB = open >= awaitingBearishStoredLow and open <= awaitingBearishStoredHigh
+        bool bodyTouchesOB = closeTouchesOB or openTouchesOB
+        if bodyTouchesOB
+            // Same-direction candle body/close touched - cancel immediately
+            // Store values for debug before clearing
+            float debugOBHigh = awaitingBearishStoredHigh
+            float debugOBLow = awaitingBearishStoredLow
+            pendingGapAwaitingBearish := false
+            awaitingBearishStoredHigh := na
+            awaitingBearishStoredLow := na
+            awaitingBearishStoredBar := na
+            pendingGapRegionHigh := na
+            pendingGapRegionLow := na
+            gapFillBar := na
+            awaitingBearishMarkerType := "none"
+            cancelled := true
+            // === Debug: Gap-Awaiting OB Cancellation ===
+            if f_isInDebugTimeframe()
+                string touchDetail = ""
+                if closeTouchesOB and openTouchesOB
+                    touchDetail := "Both O&C touch"
+                else if closeTouchesOB
+                    touchDetail := "Close touches"
+                else
+                    touchDetail := "Open touches"
+                label.new(bar_index, low, text="❌ CANCEL\nGap-Awaiting OB\nSame-direction\nBearish OB\n" + touchDetail + "\nOB: " + str.tostring(debugOBLow, "#.####") + "-" + str.tostring(debugOBHigh, "#.####") + "\nCandle O: " + str.tostring(open, "#.####") + "\nCandle C: " + str.tostring(close, "#.####") + "\nClose in OB: " + str.tostring(closeTouchesOB) + "\nOpen in OB: " + str.tostring(openTouchesOB), style=label.style_label_up, color=color.orange, textcolor=color.white, size=size.small)
+                // Plot OB zone boundaries
+                if debugPlotLines
+                    line.new(bar_index - 1, debugOBHigh, bar_index + 1, debugOBHigh, color=color.orange, width=2, style=line.style_dashed)
+                    line.new(bar_index - 1, debugOBLow, bar_index + 1, debugOBLow, color=color.orange, width=2, style=line.style_dashed)
+    
+    // Only continue with marker validation if not cancelled
+    if not cancelled
+        intersects = not na(pendingGapRegionHigh) and not na(pendingGapRegionLow) and (awaitingBearishStoredHigh >= pendingGapRegionLow and awaitingBearishStoredLow <= pendingGapRegionHigh)
+        if intersects
+            [markerIsValid, markerLow, markerHigh, markerType] = f_isValidMarker()
+            if not (useStraightMarker or useSwingMarker) or markerIsValid
+                confirmBearHigh := high
+                confirmBearLow := low
+                confirmBearBar := bar_index
+                awaitingBearishSweep := true
+                awaitingBearishMarkerType := markerType
+                // Clear gap-awaiting flag once marker is found
+                pendingGapAwaitingBearish := false
+                pendingGapRegionHigh := na
+                pendingGapRegionLow := na
+                gapFillBar := na
+            // If marker not found yet, keep waiting (but timeout after maxLookback bars from gap fill)
+            else if not na(gapFillBar) and bar_index - gapFillBar > maxLookback
+                // Timeout - clear gap-awaiting after maxLookback bars
+                pendingGapAwaitingBearish := false
+                pendingGapRegionHigh := na
+                pendingGapRegionLow := na
+                gapFillBar := na
+
+// === Track bullish wick touches to drawn OBs (Wich OB Rule) ===
+if array.size(bullishOBs) > 0
+    for i = 0 to array.size(bullishOBs) - 1
+        b = array.get(bullishOBs, i)
+        // Check if bullish wick touches the OB zone
+        if isBullish and low <= box.get_top(b) and low >= box.get_bottom(b)
+            // Mark that a bullish wick has touched this OB (prevents premature mitigation)
+            if i < array.size(bullishOBWickTouched)
+                array.set(bullishOBWickTouched, i, true)
+
+if array.size(bearishOBs) > 0
+    for i = 0 to array.size(bearishOBs) - 1
+        b = array.get(bearishOBs, i)
+        // For bearish OB, check if bearish wick touches the OB zone
+        if isBearish and high >= box.get_bottom(b) and high <= box.get_top(b)
+            // Mark that a bearish wick has touched this OB (prevents premature mitigation)
+            if i < array.size(bearishOBWickTouched)
+                array.set(bearishOBWickTouched, i, true)
+
+// === Touch Mitigation for Drawn OBs (with Wich OB Rule)
+// Note: v5 doesn't support array.remove(), so boxes are only faded, not deleted
+// Wich OB Rule: OB remains valid if a bullish wick touched it first, even if bearish candles touch later
+if array.size(bullishOBs) > 0
+    for i = 0 to array.size(bullishOBs) - 1
+        b = array.get(bullishOBs, i)
+        // Check if bullish wick has touched first (Wich OB Rule)
+        bool wickTouched = false
+        if i < array.size(bullishOBWickTouched)
+            wickTouched := array.get(bullishOBWickTouched, i)
+        // Mark mitigated when price touches the OB zone
+        // For bullish OB: mitigate when bearish candle touches (price trying to go back down)
+        // OR when bullish candle touches after OB is drawn (price using the OB zone)
+        bool shouldMitigate = false
+        if isBearish and not wickTouched
+            // Bearish candle touches - price trying to go back down, OB is used
+            shouldMitigate := true
+        else if isBullish
+            // Bullish candle touches - price using the OB zone on the way up
+            // This also mitigates the OB
+            shouldMitigate := true
+        
+        if shouldMitigate
+            // Check if candle body closes inside OB
+            if close <= box.get_top(b) and close >= box.get_bottom(b)
+                bullishMitigated := true
+                if showMitigatedMarkers
+                    box.set_bgcolor(b, color.new(bullishOBColor, bullishMitigatedFade))
+                    box.set_border_color(b, bullishMitigatedBorder)
+            // Or if candle wick overlaps the OB
+            else if high >= box.get_top(b) and low <= box.get_bottom(b)
+                bullishMitigated := true
+                if showMitigatedMarkers
+                    box.set_bgcolor(b, color.new(bullishOBColor, bullishMitigatedFade))
+                    box.set_border_color(b, bullishMitigatedBorder)
+
+if array.size(bearishOBs) > 0
+    for i = 0 to array.size(bearishOBs) - 1
+        b = array.get(bearishOBs, i)
+        // Check if bearish wick has touched first (Wich OB Rule - opposite for bearish OB)
+        bool wickTouched = false
+        if i < array.size(bearishOBWickTouched)
+            wickTouched := array.get(bearishOBWickTouched, i)
+        // Mark mitigated when price touches the OB zone
+        // For bearish OB: mitigate when bullish candle touches (price trying to go back up)
+        // OR when bearish candle touches after OB is drawn (price using the OB zone)
+        bool shouldMitigate = false
+        if isBullish and not wickTouched
+            // Bullish candle touches - price trying to go back up, OB is used
+            shouldMitigate := true
+        else if isBearish
+            // Bearish candle touches - price using the OB zone on the way down
+            // This also mitigates the OB
+            shouldMitigate := true
+        
+        if shouldMitigate
+            // Check if candle body closes inside OB
+            if close >= box.get_bottom(b) and close <= box.get_top(b)
+                bearishMitigated := true
+                if showMitigatedMarkers
+                    box.set_bgcolor(b, color.new(bearishOBColor, bearishMitigatedFade))
+                    box.set_border_color(b, bearishMitigatedBorder)
+            // Or if candle wick overlaps the OB
+            else if high >= box.get_top(b) and low <= box.get_bottom(b)
+                bearishMitigated := true
+                if showMitigatedMarkers
+                    box.set_bgcolor(b, color.new(bearishOBColor, bearishMitigatedFade))
+                    box.set_border_color(b, bearishMitigatedBorder)
+
+// === Alerts ===
+alertcondition(bullishSweepHappened, title="Bullish OB Confirmed", message="Bullish OB (wick rule) confirmed!")
+alertcondition(bearishSweepHappened, title="Bearish OB Confirmed", message="Bearish OB (wick rule) confirmed!")
+alertcondition(bullishMitigated, title="Bullish OB Mitigated", message="Bullish Order Block mitigated!")
+alertcondition(bearishMitigated, title="Bearish OB Mitigated", message="Bearish Order Block mitigated!")
