@@ -23,6 +23,7 @@ enum BreakState
     IDLE
     COLLECT_OPPOSITE
     WAIT_BREAK
+    WAIT_BREAK_CONTINUE
 
 //Break Marker state storage (scalable)
 var bool[] bmLocked = array.new_bool(2, false)
@@ -108,8 +109,8 @@ mitBorder  = input.color(color.new(color.green, 0), "Mitigated Border")
 
 // Optional labels
 showDebugLabels = input.bool(false, "Debug Labels")
-debugStartDate       = timestamp("2026-02-04 12:00")//input.time(timestamp("2026-02-19 11:00"), "Debug Start Date/Time")
-debugEndDate         = timestamp("2026-02-05 00:00")//input.time(timestamp("2026-02-19 24:00"), "Debug End Date/Time")
+debugStartDate       = timestamp("2026-02-27 20:00")//input.time(timestamp("2026-02-19 11:00"), "Debug Start Date/Time")
+debugEndDate         = timestamp("2026-02-27 22:00")//input.time(timestamp("2026-02-19 24:00"), "Debug End Date/Time")
 
 //────────────────────────────────────────
 // Pip size (simple, stable)
@@ -307,9 +308,6 @@ f_isOpposite(dir) =>
 
 f_extremeTaken(dir, extreme) =>
     dir == 1 ? high > extreme : low < extreme
-
-f_cleanStraight(dir) =>
-    f_isImpulse(dir)[2] and f_isImpulse(dir)[1] and f_isImpulse(dir) and (dir == 1 ? high[1] > high[2] and high[1] > high : low[1] < low[2] and low[1] < low)
 
 //break marker
 f_isDirBull(dir) => dir == 1
@@ -515,6 +513,7 @@ if bearState == OBState.AWAIT_SWEEP
         bearState := OBState.IDLE
 
 // Updated OB and Clean Marker Logic with distinct OB start
+
 for d = 0 to 1
     dir = d == 0 ? 1 : -1
 
@@ -523,18 +522,22 @@ for d = 0 to 1
     if startContext and array.get(cmState, d) == CleanState.IDLE
         array.set(cmState, d, CleanState.SCANNING)
 
-    lastOppBar = f_findLastOppositeBar(dir, markerLookback) 
+    lastOppBar = f_findLastOppositeBar(dir, markerLookback)
+    
     if array.get(cmState, d) == CleanState.SCANNING
+
+        cleanStraight = f_isImpulse(dir)[2] and f_isImpulse(dir)[1] and f_isImpulse(dir) and (dir == 1 ? high[1] > high[2] and high[1] > high : low[1] < low[2] and low[1] < low)
+ 
         if f_isOpposite(dir)
             array.set(cmState, d, CleanState.IDLE)
-
-        else if bar_index >= 2 and f_cleanStraight(dir)
+        
+        else if bar_index >= 2 and cleanStraight
             // Store straight marker reference for CLEAN break
             if dir == 1
-                array.set(cmBreakRef, d, high)   // straight bullish candle high
+                array.set(cmBreakRef, d, high[1])   // straight bullish candle high
             else
-                array.set(cmBreakRef, d, low)    // straight bearish candle low
-                
+                array.set(cmBreakRef, d, low[1])    // straight bearish candle low
+            
             if not na(lastOppBar)
                 offset = bar_index - lastOppBar
 
@@ -554,7 +557,7 @@ for d = 0 to 1
 
                 array.set(cmLeft, d, lastOppBar)
                 array.set(cmState, d, CleanState.WAIT_TAKE)
-                
+               
     // WAIT_TAKE phase
     if array.get(cmState, d) == CleanState.WAIT_TAKE
         if f_isOpposite(dir)
@@ -567,7 +570,7 @@ for d = 0 to 1
                 array.set(cmExtremeTaken, d, true)
 
             // CLEAN break (local to straight marker)
-            cleanBreak = dir == 1 ? close > array.get(cmBreakRef, d) : close < array.get(cmBreakRef, d)
+            cleanBreak = dir == 1 ? high > array.get(cmBreakRef, d) : low < array.get(cmBreakRef, d)
 
             if array.get(cmExtremeTaken, d) and cleanBreak
                 rawTop = dir == 1 ? array.get(cmExtreme, d) : array.get(cmZoneHigh, d)
@@ -594,12 +597,17 @@ for d = 0 to 1
                 array.set(cmState, d, CleanState.IDLE)
                 array.set(cmExtremeTaken, d, false)
                 array.set(cmBreakRef, d, na)
-                
+
 // BREAK MARKER Logic
 for d = 0 to 1
     dir = d == 0 ? 1 : -1
 
     lastOppBar = f_findLastOppositeBar(dir, markerLookback)
+
+    // Await cancel determine
+    // if array.get(bmState, d) == BreakState.WAIT_BREAK_CONTINUE and f_isImpulse(dir) != f_isImpulse(dir)[1]
+    //     array.set(bmState, d, BreakState.IDLE)
+    
     // Start
     if f_isBreakContext(dir) and array.get(bmState, d) == BreakState.IDLE
         array.set(bmLocked, d, false)   // 🔓 allow new sequence
@@ -608,6 +616,7 @@ for d = 0 to 1
         array.set(bmLow,  d, na)
         array.set(bmPreHigh, d, na)
         array.set(bmPreLow,  d, na)
+        // label.new(bar_index, high, str.tostring(open), style=label.style_label_down, textcolor=color.white)
 
     // Check if price has touched the zone and moved in the same direction (cancel break marker if touched)
     if array.get(bmState, d) == BreakState.COLLECT_OPPOSITE
@@ -625,14 +634,16 @@ for d = 0 to 1
         if f_isImpulse(dir) and na(array.get(bmPreHigh, d))
             array.set(bmPreHigh, d, high)
             array.set(bmPreLow,  d, low)
-        
+
         else if f_isOpposite(dir)
+            
             h = array.get(bmHigh, d)
             l = array.get(bmLow, d)
             array.set(bmHigh, d, na(h) ? high : math.max(h, high))
             array.set(bmLow,  d, na(l) ? low  : math.min(l, low))
             
             if not na(lastOppBar)
+                
                 array.set(bmLeft, d, lastOppBar)
 
                 offset = bar_index - lastOppBar
@@ -648,6 +659,9 @@ for d = 0 to 1
                 array.set(bmOBLow, d, adjBot)   // bullish OB bottom
                     
             array.set(bmState, d, BreakState.WAIT_BREAK)
+        // else
+        //     label.new(bar_index, high, str.tostring(open == close), style=label.style_label_down, textcolor=color.white)
+
 
     // WAIT BREAK
     if array.get(bmState, d) == BreakState.WAIT_BREAK and barstate.isconfirmed
@@ -681,8 +695,7 @@ for d = 0 to 1
             refBreak = dir == 1 ? highestBearish : lowestBullish
 
             // If the close crosses the high of the highest bearish or bullish candle before, then it's valid
-            broken = dir == 1 ? close > refBreak : close < refBreak
-
+            broken = dir == 1 ? high > refBreak : low < refBreak
             // Ensure the break happens and the sequence isn't locked
             if broken and not array.get(bmLocked, d)
                 rawTop = dir == 1 ? refBreak : array.get(bmHigh, d)
@@ -694,6 +707,7 @@ for d = 0 to 1
                 
                 // Ensure the zone is valid and the OB isn't mitigated
                 if f_distanceOk(dir == 1 ? zoneHigh : zoneLow, close) and useBreakMarker
+
                     bx = box.new(array.get(bmLeft, d), zoneHigh, bar_index, zoneLow, bgcolor = dir == 1 ? bullFill : bearFill, border_color = dir == 1 ? bullBorder : bearBorder)
 
                     array.push(obBoxes, bx)
@@ -704,7 +718,7 @@ for d = 0 to 1
 
                     array.set(bmLocked, d, true)
 
-                 
+                    // array.set(bmState, d, BreakState.IDLE)
 
                     if dir == 1
                         bullConfirmed := true
@@ -713,7 +727,10 @@ for d = 0 to 1
 
             // Always reset after impulse evaluation
             array.set(bmState, d, BreakState.IDLE)
+            // array.set(bmState, d, BreakState.WAIT_BREAK_CONTINUE)
 
+if barstate.isconfirmed
+    f_pruneOldest()
 //────────────────────────────────────────
 // Same-Direction Touch Deletion (IMMEDIATE)
 //────────────────────────────────────────
