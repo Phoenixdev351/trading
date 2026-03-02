@@ -453,6 +453,7 @@ if bullState == OBState.AWAIT_SWEEP
     sweep1 = not na(bullConfirmHigh) and high > bullConfirmHigh
     sweep2 = not na(bullExtraBearHigh) and high > bullExtraBearHigh
     pbOk   = not na(bullConfirmBar) and f_pbBull(bullConfirmBar)
+    //label.new(bar_index, low, str.tostring(high), style=label.style_label_down, textcolor=color.white)
 
     if (sweep1 or sweep2 or pbOk) and isBull
         if f_distanceOk(bullTop, low) and useGeneralMarker
@@ -541,8 +542,7 @@ for d = 0 to 1
     lastOppBar = f_findLastOppositeBar(dir, markerLookback)
 
     if array.get(cmState, d) == CleanState.SCANNING
-
-        cleanStraight = f_isImpulse(dir)[2] and f_isImpulse(dir)[1] and f_isImpulse(dir) and (dir == 1 ? high[1] > high[2] and high[1] > high : low[1] < low[2] and low[1] < low)
+        cleanStraight = (dir == 1 ? f_isImpulse(1)[2] and f_isImpulse(1)[1] and f_isImpulse(1) : f_isImpulse(-1)[2] and f_isImpulse(-1)[1] and f_isImpulse(-1)) and (dir == 1 ? high[1] > high[2] and high[1] > high : low[1] < low[2] and low[1] < low)
 
         if f_isOpposite(dir)
             array.set(cmState, d, CleanState.IDLE)
@@ -678,7 +678,6 @@ for d = 0 to 1
         // else
         //     label.new(bar_index, high, str.tostring(open == close), style=label.style_label_down, textcolor=color.white)
 
-
     // WAIT BREAK
     if array.get(bmState, d) == BreakState.WAIT_BREAK and barstate.isconfirmed
         // Check if price has touched the zone and moved in the same direction (cancel break marker if touched)
@@ -712,6 +711,8 @@ for d = 0 to 1
 
             // If the close crosses the high of the highest bearish or bullish candle before, then it's valid
             broken = dir == 1 ? high > refBreak : low < refBreak
+            // label.new(bar_index, high, str.tostring(refBreak), style=label.style_label_down, textcolor=color.white)
+            // label.new(bar_index, low, str.tostring(bmLow), style=label.style_label_up, textcolor=color.white)
             // Ensure the break happens and the sequence isn't locked
             if broken and not array.get(bmLocked, d)
                 rawTop = dir == 1 ? refBreak : array.get(bmHigh, d)
