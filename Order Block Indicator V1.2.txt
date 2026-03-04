@@ -519,16 +519,11 @@ for d = 0 to 1
                 array.set(cmExtremeTaken, d, false)
                 array.set(cmBreakRef, d, na)
 
-
 // BREAK MARKER Logic
 for d = 0 to 1
     dir = d == 0 ? 1 : -1
 
     lastOppBar = f_findLastOppositeBar(dir, markerLookback)
-
-    //WAIT_BREAK_CONTINUE dir check
-    if array.get(bmState, d) == BreakState.WAIT_BREAK_CONTINUE and not ((isBull[1] and isBull) or (isBear[1] and isBear))
-        array.set(bmState, d, BreakState.IDLE)
 
     // Start
     if f_isBreakContext(dir) and array.get(bmState, d) == BreakState.IDLE
@@ -539,25 +534,13 @@ for d = 0 to 1
         array.set(bmPreHigh, d, na)
         array.set(bmPreLow,  d, na)
 
-    // Check if price has touched the zone and moved in the same direction (cancel break marker if touched)
-    if array.get(bmState, d) == BreakState.COLLECT_OPPOSITE
-        if f_sameDirTouch(dir, array.get(bmOBHigh, d), array.get(bmOBLow, d), -1) // Same direction touch check
-            // If price touches and moves in the same direction, cancel the break immediately
-            array.set(bmState, d, BreakState.IDLE)  // Reset the state
-            array.set(bmHigh, d, na)  // Clear the high
-            array.set(bmLow, d, na)  // Clear the low
-            array.set(bmLeft, d, na)  // Clear the left
-            array.set(bmOBHigh, d, na)  // Clear OB high
-            array.set(bmOBLow, d, na)  // Clear OB low
-
     // COLLECT OPPOSITE
-    if array.get(bmState, d) == BreakState.COLLECT_OPPOSITE and barstate.isconfirmed
+    if array.get(bmState, d) == BreakState.COLLECT_OPPOSITE// and barstate.isconfirmed
         if f_isImpulse(dir) and na(array.get(bmPreHigh, d))
             array.set(bmPreHigh, d, high)
             array.set(bmPreLow,  d, low)
 
         else if f_isOpposite(dir)
-            
             h = array.get(bmHigh, d)
             l = array.get(bmLow, d)
             array.set(bmHigh, d, na(h) ? high : math.max(h, high))
@@ -583,6 +566,15 @@ for d = 0 to 1
 
     // WAIT BREAK
     if (array.get(bmState, d) == BreakState.WAIT_BREAK or array.get(bmState, d) == BreakState.WAIT_BREAK_CONTINUE) and barstate.isconfirmed
+
+        // Keep collecting opposite structure
+        if f_isOpposite(dir)
+            array.set(bmHigh, d, math.max(array.get(bmHigh, d), high))
+            array.set(bmLow,  d, math.min(array.get(bmLow, d), low))
+            if not (close[1] > open[1] and close > open) and not (close[1] < open[1] and close < open)
+                array.set(bmPreHigh, d, high[1])
+                array.set(bmPreLow,  d, low[1])
+
         // Check if price has touched the zone and moved in the same direction (cancel break marker if touched)
         if f_sameDirTouch(dir, array.get(bmOBHigh, d), array.get(bmOBLow, d), array.get(bmLeft, d)) // Same direction touch check
             // If price touches and moves in the same direction, cancel the break immediately
@@ -593,21 +585,12 @@ for d = 0 to 1
             array.set(bmOBHigh, d, na)  // Clear OB high
             array.set(bmOBLow, d, na)  // Clear OB low
 
-        // Keep collecting opposite structure
-        if f_isOpposite(dir)
-            array.set(bmHigh, d, math.max(array.get(bmHigh, d), high))
-            array.set(bmLow,  d, math.min(array.get(bmLow, d), low))
-            if not (close[1] > open[1] and close > open) and not (close[1] < open[1] and close < open)
-                array.set(bmPreHigh, d, high[1])
-                array.set(bmPreLow,  d, low[1])
-
         // Impulse attempts a break
-        else if f_isImpulse(dir)
-
+        else if not f_isOpposite(dir) and f_isImpulse(dir)
             // Track the highest candle of the bearish candles + the bullish candle before the bearish candles
             highestBearish = array.get(bmHigh, d)
             lowestBullish = array.get(bmLow, d)
-            
+
             // Check for highest price of the bullish candle before bearish candles
             if dir == 1
                 highestBearish := math.max(highestBearish, array.get(bmPreHigh, d))
@@ -652,6 +635,17 @@ for d = 0 to 1
             // wait new break
             if array.get(bmState, d) != BreakState.IDLE
                 array.set(bmState, d, BreakState.WAIT_BREAK_CONTINUE)
+
+        // Start
+        //label.new(bar_index, high, str.tostring(array.get(bmState, d)), style=label.style_label_down, textcolor=color.white)
+        if f_isBreakContext(dir) and (array.get(bmState, d) == BreakState.WAIT_BREAK_CONTINUE)
+            array.set(bmLocked, d, false)   // 🔓 allow new sequence
+            array.set(bmState, d, BreakState.COLLECT_OPPOSITE)
+            array.set(bmHigh, d, na)
+            array.set(bmLow,  d, na)
+            array.set(bmPreHigh, d, na)
+            array.set(bmPreLow,  d, na)
+
 
 //────────────────────────────────────────
 // Bullish state machine
