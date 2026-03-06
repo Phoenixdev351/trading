@@ -24,6 +24,8 @@ enum BreakState
     COLLECT_OPPOSITE
     WAIT_BREAK
     WAIT_BREAK_CONTINUE
+    
+var bool wait_break_continue_bos = false
 
 //Break Marker state storage (scalable)
 var bool[] bmLocked = array.new_bool(2, false)
@@ -519,6 +521,23 @@ for d = 0 to 1
                 array.set(cmExtremeTaken, d, false)
                 array.set(cmBreakRef, d, na)
 
+f_bmHighLow(_dir, maxLookback) =>
+    bool isOpp = false
+    float _bmHigh = na
+    float _bmLow = na
+    float _bmPreHigh = na
+    float _bmPreLow = na
+    for i = 1 to maxLookback
+        if _dir == 1 ? close[i] < open[i] : close[i] > open[i]
+            isOpp := true
+            _bmHigh := na(_bmHigh) ? high[i] : math.max(_bmHigh, high[i])
+            _bmLow := na(_bmLow) ? low[i] : math.min(_bmLow, low[i])
+        else if isOpp == true
+            _bmPreHigh := high[i]
+            _bmPreLow := low[i]
+            break
+    [_bmHigh, _bmLow, _bmPreHigh, _bmPreLow]
+
 // BREAK MARKER Logic
 for d = 0 to 1
     dir = d == 0 ? 1 : -1
@@ -533,14 +552,27 @@ for d = 0 to 1
         array.set(bmLow,  d, na)
         array.set(bmPreHigh, d, na)
         array.set(bmPreLow,  d, na)
+    
+
+    //bmHigh, low initial
+    if array.get(bmState, d) == BreakState.WAIT_BREAK_CONTINUE and f_isOpposite(dir)
+        array.set(bmHigh, d, na)
+        array.set(bmLow,  d, na)
 
     // COLLECT OPPOSITE
-    if array.get(bmState, d) == BreakState.COLLECT_OPPOSITE// and barstate.isconfirmed
-        if f_isImpulse(dir) and na(array.get(bmPreHigh, d))
+    if array.get(bmState, d) == BreakState.COLLECT_OPPOSITE or array.get(bmState, d) == BreakState.WAIT_BREAK_CONTINUE or wait_break_continue_bos// and barstate.isconfirmed
+        if f_isOpposite(dir) and (wait_break_continue_bos or array.get(bmState, d) == BreakState.WAIT_BREAK_CONTINUE)
+            h = array.get(bmHigh, d)
+            l = array.get(bmLow, d)
+
+            array.set(bmHigh, d, na(h) ? high : math.max(h, high))
+            array.set(bmLow,  d, na(l) ? low  : math.min(l, low))
+
+        if f_isImpulse(dir) and na(array.get(bmPreHigh, d)) and array.get(bmState, d) == BreakState.COLLECT_OPPOSITE
             array.set(bmPreHigh, d, high)
             array.set(bmPreLow,  d, low)
 
-        else if f_isOpposite(dir)
+        else if f_isOpposite(dir) and array.get(bmState, d) == BreakState.COLLECT_OPPOSITE
             h = array.get(bmHigh, d)
             l = array.get(bmLow, d)
             array.set(bmHigh, d, na(h) ? high : math.max(h, high))
@@ -561,11 +593,14 @@ for d = 0 to 1
 
                 array.set(bmOBHigh, d, adjTop)   // bullish OB top
                 array.set(bmOBLow, d, adjBot)   // bullish OB bottom
-                    
+
             array.set(bmState, d, BreakState.WAIT_BREAK)
+            wait_break_continue_bos := false
+            // label.new(bar_index, high, str.tostring(true), style=label.style_label_down, textcolor=color.white)
+
 
     // WAIT BREAK
-    if (array.get(bmState, d) == BreakState.WAIT_BREAK or array.get(bmState, d) == BreakState.WAIT_BREAK_CONTINUE) and barstate.isconfirmed
+    if (array.get(bmState, d) == BreakState.WAIT_BREAK or array.get(bmState, d) == BreakState.WAIT_BREAK_CONTINUE or wait_break_continue_bos) and barstate.isconfirmed
 
         // Keep collecting opposite structure
         if f_isOpposite(dir)
@@ -588,6 +623,15 @@ for d = 0 to 1
         // Impulse attempts a break
         else if not f_isOpposite(dir) and f_isImpulse(dir)
             // Track the highest candle of the bearish candles + the bullish candle before the bearish candles
+            if dir == 1 ? na(array.get(bmHigh, d)) : na(array.get(bmLow, d))// continue candle
+                [fbmHigh, fbmLow, fbmPreHigh, fbmPreLow] = f_bmHighLow(dir, markerLookback)
+                array.set(bmHigh, d, fbmHigh)
+                array.set(bmLow, d, fbmLow)
+                if dir == -1
+                    array.set(bmPreLow, d, fbmPreLow)
+                else
+                    array.set(bmPreHigh, d, fbmPreHigh)
+
             highestBearish = array.get(bmHigh, d)
             lowestBullish = array.get(bmLow, d)
 
@@ -611,7 +655,7 @@ for d = 0 to 1
                 // Apply the same wick rule as General Marker
                 zoneHigh = array.get(bmOBHigh, d)
                 zoneLow = array.get(bmOBLow, d)
-                
+               
                 // Ensure the zone is valid and the OB isn't mitigated
                 if f_distanceOk(dir == 1 ? zoneHigh : zoneLow, dir == 1 ? low : high) and useBreakMarker and not f_boxLeftExists(array.get(bmLeft, d))
 
@@ -638,14 +682,14 @@ for d = 0 to 1
 
         // Start
         //label.new(bar_index, high, str.tostring(array.get(bmState, d)), style=label.style_label_down, textcolor=color.white)
-        if f_isBreakContext(dir) and (array.get(bmState, d) == BreakState.WAIT_BREAK_CONTINUE)
+        if f_isBreakContext(dir) and not (array.get(bmState, d) == BreakState.IDLE)
             array.set(bmLocked, d, false)   // 🔓 allow new sequence
             array.set(bmState, d, BreakState.COLLECT_OPPOSITE)
             array.set(bmHigh, d, na)
             array.set(bmLow,  d, na)
             array.set(bmPreHigh, d, na)
             array.set(bmPreLow,  d, na)
-
+            wait_break_continue_bos := true
 
 //────────────────────────────────────────
 // Bullish state machine
@@ -743,7 +787,6 @@ if bearState == OBState.PENDING and barstate.isconfirmed and isBull  and not isN
             label.new(bar_index, high, "BEAR CONFIRM", style=label.style_label_down, textcolor=color.white)
     else
         bearState := OBState.IDLE
-        label.new(bar_index, high, "skfhowefhi", style=label.style_label_down, textcolor=color.white)
 
 if bearState == OBState.AWAIT_SWEEP
     if f_sameDirTouch(-1, bearTop, bearBot, bearLeft)
